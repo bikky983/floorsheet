@@ -29,7 +29,7 @@ jobs:
         python merolagani_scraper.py
     
     - name: Upload scraped data
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v4
       with:
         name: floorsheet-data
         path: floorsheet_data/
