@@ -35,124 +35,48 @@ jobs:
         free -h
         nproc
         
-        # Create temp directory for buffering data
+        # Create output directories and make them writable
         mkdir -p temp_data
-        
-    - name: Create optimized scraper script
-      run: |
-        cat > optimize_scraper.py << 'EOF'
-        import os
-        import sys
-        import gc
-        import merolagani_scraper as ms
-
-        scraper = ms.MerolaganiFloorsheetScraper()
-        max_pages = None  # Set to None to scrape all pages
-
-        # Function to save checkpoint data
-        def save_checkpoint(data, checkpoint_num):
-            temp_file = f'temp_data/checkpoint_{checkpoint_num}.parquet'
-            if not data.empty:
-                scraper.save_to_parquet(data, output_file=temp_file)
-                print(f'Saved checkpoint {checkpoint_num} with {len(data)} records')
-            return temp_file
-
-        # Get first page to determine total pages
-        first_page = scraper._get_page(1)
-        if not first_page:
-            print('Failed to fetch the first page.')
-            sys.exit(1)
-
-        # Extract total pages and current date
-        total_pages = scraper._get_total_pages(first_page)
-        scraper.current_date = scraper._extract_date(first_page)
-        print(f'Date: {scraper.current_date}, Total pages: {total_pages}')
-
-        # Limit pages if specified
-        if max_pages:
-            total_pages = min(total_pages, max_pages)
-
-        # Process in batches of 20 pages
-        batch_size = 20
-        checkpoint_files = []
-
-        for batch_start in range(1, total_pages + 1, batch_size):
-            batch_end = min(batch_start + batch_size - 1, total_pages)
-            print(f'Processing batch from page {batch_start} to {batch_end}')
-            
-            # Clear data for this batch
-            scraper.all_data = []
-            
-            # Process pages in this batch
-            for page_num in range(batch_start, batch_end + 1):
-                scraper._random_delay()
-                print(f'Fetching page {page_num}/{total_pages}')
-                
-                page_soup = scraper._get_page(page_num)
-                if page_soup:
-                    page_transactions = scraper._extract_transactions(page_soup)
-                    scraper.all_data.extend(page_transactions)
-                    print(f'Processed page {page_num}/{total_pages}, extracted {len(page_transactions)} transactions')
-                else:
-                    print(f'Failed to fetch page {page_num}')
-                
-                # Force garbage collection
-                gc.collect()
-            
-            # Save checkpoint for this batch
-            batch_df = ms.pd.DataFrame(scraper.all_data)
-            if not batch_df.empty:
-                checkpoint_file = save_checkpoint(batch_df, len(checkpoint_files) + 1)
-                checkpoint_files.append(checkpoint_file)
-            
-            # Force garbage collection between batches
-            scraper.all_data = []
-            gc.collect()
-
-        # Merge all checkpoints
-        print('Merging all checkpoints...')
-        all_dfs = []
-        for checkpoint_file in checkpoint_files:
-            if os.path.exists(checkpoint_file):
-                df = ms.pd.read_parquet(checkpoint_file)
-                all_dfs.append(df)
-                # Remove checkpoint file after reading
-                os.remove(checkpoint_file)
-
-        if all_dfs:
-            final_df = ms.pd.concat(all_dfs, ignore_index=True)
-            output_dir = 'floorsheet_data'
-            scraper.save_to_parquet(final_df, output_file=f'{output_dir}/merolagani_floorsheet.parquet')
-            
-            # Print summary
-            print('\nScraping Summary:')
-            print(f'Total records scraped: {len(final_df)}')
-            print(f'Trading date: {scraper.current_date}')
-            print(f'Data saved to: {output_dir}/merolagani_floorsheet (partitioned by date)')
-        else:
-            print('No data was scraped.')
-        EOF
+        mkdir -p public/floorsheet_data
+        chmod -R 777 temp_data public
     
-    - name: Run optimized scraper
+    - name: Run scraper
       run: |
         # Set environment variables to optimize Python memory usage
         export PYTHONUNBUFFERED=1
         export PYTHONMALLOC=malloc
         export MALLOC_TRIM_THRESHOLD_=65536
         
-        python optimize_scraper.py
+        # Run the script and save output to a log file
+        python merolagani_scraper.py 2>&1 | tee scraper_output.log
+        
+        # Print directory contents for debugging
+        echo "Current directory contents:"
+        ls -la
+        echo "public directory contents:"
+        ls -la public || echo "Directory doesn't exist"
+        echo "public/floorsheet_data directory contents:"
+        ls -la public/floorsheet_data || echo "Directory doesn't exist"
+    
+    - name: Commit files to repository
+      run: |
+        git config --global user.name 'github-actions'
+        git config --global user.email 'github-actions@github.com'
+        
+        # Add all files in the public directory
+        git add public/
+        
+        # Commit and push the changes
+        git commit -m "Update floorsheet data $(date +'%Y-%m-%d')" || echo "No changes to commit"
+        git push
     
     - name: Upload scraped data
       uses: actions/upload-artifact@v4
       with:
         name: floorsheet-data
-        path: floorsheet_data/
+        path: |
+          public/floorsheet_data/
+          public/floorsheet_data/*
+          public/floorsheet_data/**/*
         retention-days: 7
-        
-    - name: Upload execution log
-      uses: actions/upload-artifact@v4
-      with:
-        name: execution-log
-        path: ${{ github.workspace }}/*.log
-        retention-days: 1
-        if-no-files-found: ignore
+        if-no-files-found: warn
