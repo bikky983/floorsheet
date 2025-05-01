@@ -207,13 +207,14 @@ class MerolaganiFloorsheetScraper:
         # Convert to DataFrame
         return pd.DataFrame(self.all_data)
     
-    def save_to_parquet(self, df, output_file="merolagani_floorsheet.parquet"):
+    def save_to_parquet(self, df, output_file="merolagani_floorsheet.parquet", append=False):
         """
         Save the DataFrame to a Parquet file
         
         Args:
             df: pandas.DataFrame to save
             output_file: Name of the output Parquet file
+            append: Whether to append to existing file (if it exists)
         """
         if df.empty:
             print("No data to save.")
@@ -228,35 +229,100 @@ class MerolaganiFloorsheetScraper:
             if output_dir and not os.path.exists(output_dir):
                 os.makedirs(output_dir)
             
-            # Write to Parquet file, partitioned by date for more efficient access
-            pq.write_to_dataset(
-                table,
-                root_path=output_file.replace('.parquet', ''),
-                partition_cols=['date']
-            )
+            # If append mode and file exists, try to append
+            if append and os.path.exists(output_file):
+                try:
+                    # Read existing data
+                    existing_df = pd.read_parquet(output_file)
+                    print(f"Found existing file with {len(existing_df)} records")
+                    
+                    # Check for duplicates based on date and transaction_no
+                    if 'date' in df.columns and 'transaction_no' in df.columns:
+                        # Create keys for comparison
+                        df['key'] = df['date'] + '-' + df['transaction_no']
+                        existing_df['key'] = existing_df['date'] + '-' + existing_df['transaction_no']
+                        
+                        # Remove duplicates
+                        new_records = df[~df['key'].isin(existing_df['key'])]
+                        new_records = new_records.drop(columns=['key'])
+                        existing_df = existing_df.drop(columns=['key'])
+                        
+                        print(f"Found {len(df) - len(new_records)} duplicate records")
+                        print(f"Adding {len(new_records)} new records")
+                        
+                        # Combine data
+                        combined_df = pd.concat([existing_df, new_records], ignore_index=True)
+                    else:
+                        # If no way to identify duplicates, just append all
+                        combined_df = pd.concat([existing_df, df], ignore_index=True)
+                        print(f"Appended all {len(df)} records (no duplicate checking)")
+                    
+                    # Save combined data
+                    print(f"Saving combined data with {len(combined_df)} records")
+                    table = pa.Table.from_pandas(combined_df)
+                except Exception as e:
+                    print(f"Error reading/appending to existing file: {e}")
+                    print("Saving new data only")
+            
+            # Write to Parquet file
+            pq.write_table(table, output_file)
             
             print(f"Successfully saved {len(df)} records to {output_file}")
+            return True
         except Exception as e:
             print(f"Error saving to Parquet: {e}")
+            return False
+    
+    def save_outputs(self, df, output_file="public/floorsheet_data/floorsheet.parquet"):
+        """
+        Save the data to the specified parquet file
+        
+        Args:
+            df: pandas.DataFrame to save
+            output_file: Path to the output parquet file
+        """
+        if df.empty:
+            print("No data to save.")
+            return False
+        
+        try:
+            # Ensure the output directory exists
+            output_dir = os.path.dirname(output_file)
+            os.makedirs(output_dir, exist_ok=True)
+            
+            # Save to parquet file, appending if it exists
+            success = self.save_to_parquet(df, output_file=output_file, append=True)
+            
+            if success:
+                print(f"Successfully saved data to {output_file}")
+            
+            return success
+        except Exception as e:
+            print(f"Error saving outputs: {e}")
+            return False
 
 
 def main():
     # Create scraper instance
     scraper = MerolaganiFloorsheetScraper()
     
+    # Ensure output directory exists
+    os.makedirs("public/floorsheet_data", exist_ok=True)
+    os.makedirs("temp_data", exist_ok=True)
+    
     # Scrape all floorsheet pages (or set a specific max_pages value)
     df = scraper.scrape_floorsheet(max_pages=None)
     
-    # Save data to Parquet file
+    # Save data to the public directory
     if not df.empty:
-        output_dir = "floorsheet_data"
-        scraper.save_to_parquet(df, output_file=f"{output_dir}/merolagani_floorsheet.parquet")
+        # Save to the main file that grows over time with all unique records
+        success = scraper.save_outputs(df, output_file="public/floorsheet_data/floorsheet.parquet")
         
         # Print summary
         print("\nScraping Summary:")
         print(f"Total records scraped: {len(df)}")
         print(f"Trading date: {scraper.current_date}")
-        print(f"Data saved to: {output_dir}/merolagani_floorsheet (partitioned by date)")
+        print(f"Data saved to: public/floorsheet_data/floorsheet.parquet")
     else:
         print("No data was scraped.")
 
