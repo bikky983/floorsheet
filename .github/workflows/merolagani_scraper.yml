@@ -5,11 +5,21 @@ on:
     # Run daily at 6:00 AM UTC (adjust time as needed)
     - cron: '0 6 * * *'
   workflow_dispatch:  # Allows manual triggering
+    inputs:
+      scrape_date:
+        description: 'Date to scrape (YYYY-MM-DD format)'
+        required: false
+        type: string
+      max_pages:
+        description: 'Maximum number of pages to scrape (optional)'
+        required: false
+        type: string
+        default: ''
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 60  # Increase timeout to 60 minutes
+    timeout-minutes: 360  # Increase timeout to 6 hours (maximum allowed)
     
     steps:
     - name: Checkout repository
@@ -37,7 +47,7 @@ jobs:
         
         # Create output directories and make them writable
         mkdir -p temp_data
-        mkdir -p public/floorsheet_data
+        mkdir -p public
         chmod -R 777 temp_data public
     
     - name: Run scraper
@@ -47,16 +57,38 @@ jobs:
         export PYTHONMALLOC=malloc
         export MALLOC_TRIM_THRESHOLD_=65536
         
-        # Run the script and save output to a log file
-        python merolagani_scraper.py 2>&1 | tee scraper_output.log
+        # Prepare command with optional parameters
+        CMD="python merolagani_scraper.py"
+        
+        # Add date parameter if provided
+        if [ -n "${{ github.event.inputs.scrape_date }}" ]; then
+          CMD="$CMD --date ${{ github.event.inputs.scrape_date }}"
+          echo "Scraping data for date: ${{ github.event.inputs.scrape_date }}"
+        else
+          echo "Scraping latest data"
+        fi
+        
+        # Add max pages parameter if provided
+        if [ -n "${{ github.event.inputs.max_pages }}" ]; then
+          CMD="$CMD --max-pages ${{ github.event.inputs.max_pages }}"
+          echo "Maximum pages set to: ${{ github.event.inputs.max_pages }}"
+        fi
+        
+        # Run the command
+        echo "Executing: $CMD"
+        $CMD 2>&1 | tee scraper_output.log
+        
+        # Check if scraping was successful
+        if [ $? -ne 0 ]; then
+          echo "Scraping failed!"
+          exit 1
+        fi
         
         # Print directory contents for debugging
         echo "Current directory contents:"
         ls -la
         echo "public directory contents:"
         ls -la public || echo "Directory doesn't exist"
-        echo "public/floorsheet_data directory contents:"
-        ls -la public/floorsheet_data || echo "Directory doesn't exist"
     
     - name: Commit files to repository
       run: |
@@ -66,8 +98,16 @@ jobs:
         # Add all files in the public directory
         git add public/
         
+        # Set commit message with date info
+        COMMIT_MSG="Update floorsheet data"
+        if [ -n "${{ github.event.inputs.scrape_date }}" ]; then
+          COMMIT_MSG="$COMMIT_MSG for ${{ github.event.inputs.scrape_date }}"
+        else
+          COMMIT_MSG="$COMMIT_MSG $(date +'%Y-%m-%d')"
+        fi
+        
         # Commit and push the changes
-        git commit -m "Update floorsheet data $(date +'%Y-%m-%d')" || echo "No changes to commit"
+        git commit -m "$COMMIT_MSG" || echo "No changes to commit"
         git push
     
     - name: Upload scraped data
@@ -75,8 +115,6 @@ jobs:
       with:
         name: floorsheet-data
         path: |
-          public/floorsheet_data/
-          public/floorsheet_data/*
-          public/floorsheet_data/**/*
+          public/floorsheet.parquet
         retention-days: 7
         if-no-files-found: warn
